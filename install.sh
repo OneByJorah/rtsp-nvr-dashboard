@@ -81,15 +81,44 @@ fi
 # 6) Prepare the .env file
 # -----------------------------------------------------------------
 cd "$TARGET_DIR"
-if [ ! -f .env ]; then
+# -------------------------------------------------
+# 6) Prepare the .env file (robust version)
+# -------------------------------------------------
+cd "$TARGET_DIR"
+
+# Helper: create a tiny .env with just the required keys
+create_minimal_env() {
+    cat > .env <<'EOF'
+# -------------------------------------------------
+# Minimal .env – edit the values to match your environment
+# -------------------------------------------------
+HOST_IP=0.0.0.0           # change to your server's LAN IP if you like
+NVR_URL=rtsp://user:pass@<camera-ip>:554/stream   # <-- put your RTSP URL here
+ADMIN_USER=admin
+ADMIN_PASSWORD=admin
+# Add any other variables that the README mentions
+EOF
+    echo "⚙️  Created a minimal .env – please edit it now (nano .env)."
+}
+
+# Try the known template names
+if [ -f .env.sample ]; then
     cp .env.sample .env
-    echo "# ---------------------------------------------------------------"
-    echo "# Please edit the .env file now (HOST_IP, NVR_URL, etc.)"
-    echo "# ---------------------------------------------------------------"
-    nano .env   # opens the console editor; you can replace with any editor you like
+    echo "✅  Copied .env.sample → .env"
+elif [ -f .env.example ]; then
+    cp .env.example .env
+    echo "✅  Copied .env.example → .env"
+elif [ -f .env.default ]; then
+    cp .env.default .env
+    echo "✅  Copied .env.default → .env"
 else
-    echo ".env file already exists – leaving untouched"
+    echo "⚠️  No .env template found – creating a minimal one."
+    create_minimal_env
 fi
+
+# Open the file so the user can fill in the real values
+echo "🖊️  Opening .env for you to edit…"
+nano .env   # you can replace `nano` with `vim`, `vi`, or any editor you prefer
 
 # -----------------------------------------------------------------
 # 7) Bring the services up
