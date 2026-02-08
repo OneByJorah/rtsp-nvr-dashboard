@@ -2,21 +2,23 @@
 #=====================================================================
 #  RTSP NVR Dashboard – Robust installer (auto .env, Docker, logs)
 #=====================================================================
-#  What this script does:
+#  What this script does
 #   1) Installs APT prerequisites (curl, git, Docker Engine)
 #   2) Installs Docker‑Compose v2 (CLI plugin)
 #   3) Clones / updates the dashboard repo into /opt/rtsp-nvr-dashboard
-#   4) Guarantees a usable .env (copy template or interactive creation)
-#   5) Detects a docker‑compose file, creates a minimal fallback if needed
-#   6) Starts the stack with `docker compose -f <file> up -d`
-#   7) Shows final instructions + live‑log helpers
+#   4) Guarantees a usable .env (copy template or create interactively)
+#   5) Detects a docker‑compose file, removes obsolete `version:` key
+#   6) Tries to pull the images; on failure:
+#        • asks for a GHCR token (optional)
+#        • if no token, builds the images from the Dockerfiles in the repo
+#   7) Starts the stack (build → up) and prints final instructions
 #=====================================================================
 
 set -euo pipefail
 IFS=$'\n\t'
 trap 'echo -e "\n❌  Installer stopped on line $LINENO. Last command: $BASH_COMMAND\n"; exit 1' ERR
 
-# ---------- Helper functions ----------
+# ---------- Helper output ----------
 log()   { echo -e "📦  $*"; }
 ok()    { echo -e "✅  $*"; }
 warn()  { echo -e "⚠️  $*"; }
@@ -43,26 +45,22 @@ prompt() {
 log "Detecting Ubuntu version"
 UBUNTU_CODENAME=$(lsb_release -cs)
 
-# Ubuntu 24.04 (noble) does not have a public archive yet.
-# If we are on a development release, fall back to a supported LTS (jammy).
+# Ubuntu 24.04 (noble) has no stable archive yet.
 if [[ "$UBUNTU_CODENAME" == "noble" ]]; then
-    warn "You are on Ubuntu 'noble', which is still in development."
-    warn "For the purpose of this installer we will treat it as 'jammy' (22.04 LTS)."
+    warn "You are on Ubuntu 'noble' (development). Switching to 'jammy' for apt sources."
     UBUNTU_CODENAME="jammy"
 fi
 log "Using Ubuntu codename: $UBUNTU_CODENAME"
 
 # ---------- 2 – Install APT prerequisites ----------
-log "Updating APT index (forcing IPv4)"
-# Force IPv4 – avoids the “Network is unreachable” IPv6 messages
+log "Updating APT index (forcing IPv4 to avoid IPv6 time‑outs)"
 apt-get -o Acquire::ForceIPv4=true update -y
-
 log "Installing required packages"
 apt-get -o Acquire::ForceIPv4=true install -y \
     ca-certificates curl gnupg lsb-release software-properties-common git
 
 # ---------- 3 – Docker Engine ----------
-log "Adding Docker GPG key (overwrites existing one without prompting)"
+log "Adding Docker GPG key (overwrite without prompting)"
 curl -fsSL https://download.docker.com/linux/ubuntu/gpg |
     gpg --dearmor -o /usr/share/keyrings/docker-archive-keyring.gpg
 
@@ -77,7 +75,7 @@ apt-get -o Acquire::ForceIPv4=true install -y docker-ce docker-ce-cli containerd
 systemctl enable --now docker
 
 # ---------- 4 – Docker‑Compose (v2) ----------
-log "Fetching latest Docker‑Compose version tag"
+log "Fetching latest Docker‑Compose version"
 DC_LATEST=$(curl -fsSL https://api.github.com/repos/docker/compose/releases/latest |
             grep '"tag_name":' | cut -d'"' -f4 | sed 's/^v//')
 log "Latest Docker‑Compose = v$DC_LATEST"
@@ -150,10 +148,10 @@ else
     ${EDITOR:-vi} .env
 fi
 
-# ---------- 7️⃣ – Detect or create a docker‑compose file ----------
+# ---------- 7️⃣ – Find (or create) the docker‑compose file ----------
 log "Searching for a docker‑compose definition"
 
-# 1️⃣ Normal file name
+# 1️⃣ Normal name (any location)
 COMPOSE_FILE=$(find . -type f \
     \( -iname 'docker-compose.yml' -o -iname 'docker-compose.yaml' \) \
     -not -path '*/\.*' | head -n1 || true)
@@ -164,7 +162,7 @@ if [[ -z "$COMPOSE_FILE" && -f ./docker/docker-compose.yml ]]; then
     ok "Found compose file in sub‑folder: $COMPOSE_FILE"
 fi
 
-# 3️⃣ Look for any template (example / sample / default) and copy‑rename it
+# 3️⃣ Look for any *template* and copy‑rename it
 if [[ -z "$COMPOSE_FILE" ]]; then
     TEMPLATE=$(find . -type f \
         \( -iname '*compose*.example*' -o -iname '*compose*.sample*' -o -iname '*compose*.default*' \) \
@@ -176,31 +174,26 @@ if [[ -z "$COMPOSE_FILE" ]]; then
     fi
 fi
 
-# 4️⃣ If STILL nothing, create a *minimal* default compose file.
+# 4️⃣ If still missing, create a minimal default compose file (fallback)
 if [[ -z "$COMPOSE_FILE" ]]; then
-    warn "No compose file found anywhere – creating a minimal default one."
+    warn "No compose file found – creating a minimal one."
     COMPOSE_FILE="./docker-compose.yml"
     cat > "$COMPOSE_FILE" <<'EOF'
 # -------------------------------------------------------------------------
-# Minimal docker‑compose file for rtsp‑nvr‑dashboard.
-# It pulls the official images published by the project and uses the
-# variables from the .env file (HOST_IP, NVR_URL, ADMIN_*).
+# Minimal docker‑compose for rtsp‑nvr‑dashboard.
+# Uses the Dockerfiles that are present in the repository.
 # -------------------------------------------------------------------------
-version: "3.8"
-
 services:
-  # Web UI (frontend)
   frontend:
-    image: ghcr.io/onebyjorah/rtsp-nvr-dashboard-frontend:latest
+    build: ./frontend          # assumes ./frontend/Dockerfile exists
     container_name: rtsp-nvr-frontend
     env_file: ./.env
     ports:
       - "${HOST_IP:-0.0.0.0}:3000:3000"
     restart: unless-stopped
 
-  # FFmpeg worker – consumes the RTSP feed
   ffmpeg:
-    image: ghcr.io/onebyjorah/rtsp-nvr-dashboard-ffmpeg:latest
+    build: ./ffmpeg            # assumes ./ffmpeg/Dockerfile exists
     container_name: rtsp-nvr-ffmpeg
     env_file: ./.env
     restart: unless-stopped
@@ -210,17 +203,61 @@ fi
 
 ok "Using compose file: $COMPOSE_FILE"
 
-# ---------- 8️⃣ – Bring the stack up ----------
+# ---------- 8️⃣ – Clean obsolete `version:` key (if present) ----------
+if grep -q -i '^version:' "$COMPOSE_FILE"; then
+    warn "Removing obsolete `version:` line from the compose file (Docker‑Compose v2 no longer uses it)."
+    # Keep a backup just in case
+    cp "$COMPOSE_FILE" "${COMPOSE_FILE}.bak"
+    # Delete the line (case‑insensitive)
+    sed -i '/^[[:space:]]*version:/I d' "$COMPOSE_FILE"
+fi
+
+# ---------- 9️⃣ – Try to pull the images from GHCR ----------
+log "Attempting to pull the images referenced in the compose file"
+set +e   # we want to capture the failure without aborting
+docker compose -f "$COMPOSE_FILE" pull
+PULL_EXIT=$?
+set -e   # restore strict mode
+
+if [[ $PULL_EXIT -eq 0 ]]; then
+    ok "All images pulled successfully – we can skip building."
+else
+    warn "Pull failed (most likely because the images are private)."
+
+    # ------------- 9a – Ask for GHCR login -------------
+    read -rp "Do you have a GitHub Personal Access Token (read:packages) to authenticate to GHCR? (y/N) " HAVE_TOKEN
+    HAVE_TOKEN=${HAVE_TOKEN,,}
+    if [[ "$HAVE_TOKEN" == "y" || "$HAVE_TOKEN" == "yes" ]]; then
+        # Prompt for username and token (hide token entry)
+        GITHUB_USER=$(prompt "GitHub username")
+        echo "Enter your PAT (input will be hidden):"
+        read -s GITHUB_TOKEN
+        echo
+        # Perform login
+        echo "$GITHUB_TOKEN" | docker login ghcr.io -u "$GITHUB_USER" --password-stdin
+        log "Retrying image pull after successful login..."
+        docker compose -f "$COMPOSE_FILE" pull
+        ok "Images pulled successfully after authentication."
+    else
+        # ------------- 9b – Build locally as fallback -------------
+        warn "Proceeding with a local build of the two images."
+        log "Running 'docker compose build' (this may take a few minutes)…"
+        docker compose -f "$COMPOSE_FILE" build
+        ok "Local build completed."
+    fi
+fi
+
+# ---------- 🔟 – Bring the stack up ----------
 log "Running: docker compose -f \"$COMPOSE_FILE\" up -d"
 docker compose -f "$COMPOSE_FILE" up -d
 
-# ---------- 9️⃣ – Final status ----------
+# ---------- 11️⃣ – Final status ----------
 log "Waiting a few seconds for containers to initialise…"
 sleep 5
 log "Current container status"
 docker compose -f "$COMPOSE_FILE" ps
 
-# Show user the address to open
+# Show the address the UI will listen on
 HOST_IP_TO_SHOW=$(grep '^HOST_IP=' .env | cut -d'=' -f2 | tr -d '"')
 HOST_IP_TO_SHOW=${HOST_IP_TO_SHOW:-0.0.0.0}
 
