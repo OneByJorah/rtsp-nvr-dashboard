@@ -1,22 +1,22 @@
 #!/usr/bin/env bash
 #=====================================================================
-#  RTSP NVR Dashboard – Full‑featured installer (auto .env, Docker, logs)
+#  RTSP NVR Dashboard – Robust installer (auto .env, Docker, logs)
 #=====================================================================
 #  What this script does
-#   1) Installs APT prerequisites (curl, git, Docker Engine)
+#   1) Installs apt prerequisites (curl, git, Docker Engine)
 #   2) Installs Docker‑Compose v2 (CLI plugin)
-#   3) Clones or updates the dashboard repo into /opt/rtsp-nvr-dashboard
-#   4) Guarantees a usable .env (copies template or creates one interactively)
-#   5) Detects the docker‑compose file (handles sub‑folders & example names)
+#   3) Clones / updates the dashboard repo into /opt/rtsp-nvr-dashboard
+#   4) Guarantees a usable .env (copy template or create interactively)
+#   5) Detects a docker‑compose file, falling back to a minimal default
 #   6) Starts the stack with `docker compose -f <file> up -d`
 #   7) Shows final instructions + live‑log helpers
 #=====================================================================
 
-set -euo pipefail                # abort on any error, undefined var, pipe fail
-IFS=$'\n\t'                     # sane field splitting
+set -euo pipefail
+IFS=$'\n\t'
 trap 'echo -e "\n❌  Installer stopped on line $LINENO. Last command: $BASH_COMMAND\n"; exit 1' ERR
 
-# ---------- Helper functions ----------
+# ---------- Helper output ----------
 log()   { echo -e "📦  $*"; }
 ok()    { echo -e "✅  $*"; }
 warn()  { echo -e "⚠️  $*"; }
@@ -25,21 +25,21 @@ info()  { echo -e "ℹ️   $*"; }
 # Prompt helper (default optional)
 prompt() {
     local name="$1"
-    local default="${2:-}"
-    local answer
-    if [[ -n "$default" ]]; then
-        read -rp "   $name [$default]: " answer
-        echo "${answer:-$default}"
+    local def="${2:-}"
+    local ans
+    if [[ -n "$def" ]]; then
+        read -rp "   $name [$def]: " ans
+        echo "${ans:-$def}"
     else
-        read -rp "   $name: " answer
-        while [[ -z "$answer" ]]; do
-            read -rp "   $name (cannot be empty): " answer
+        read -rp "   $name: " ans
+        while [[ -z "$ans" ]]; do
+            read -rp "   $name (cannot be empty): " ans
         done
-        echo "$answer"
+        echo "$ans"
     fi
 }
 
-# ---------- 1 – Detect Ubuntu version ----------
+# ---------- 1 – Detect Ubuntu ----------
 log "Detecting Ubuntu version"
 UBUNTU_CODENAME=$(lsb_release -cs)
 log "Ubuntu codename: $UBUNTU_CODENAME"
@@ -50,12 +50,12 @@ apt-get update -y
 log "Installing required packages"
 apt-get install -y ca-certificates curl gnupg lsb-release software-properties-common git
 
-# ---------- 3 – Install Docker Engine ----------
+# ---------- 3 – Docker Engine ----------
 log "Adding Docker GPG key"
 curl -fsSL https://download.docker.com/linux/ubuntu/gpg |
     gpg --dearmor -o /usr/share/keyrings/docker-archive-keyring.gpg
 
-log "Adding Docker APT repository"
+log "Adding Docker repository"
 echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/docker-archive-keyring.gpg] \
 https://download.docker.com/linux/ubuntu $UBUNTU_CODENAME stable" |
     tee /etc/apt/sources.list.d/docker.list > /dev/null
@@ -65,8 +65,8 @@ apt-get update -y
 apt-get install -y docker-ce docker-ce-cli containerd.io
 systemctl enable --now docker
 
-# ---------- 4 – Install Docker‑Compose (v2) ----------
-log "Fetching latest Docker‑Compose version tag"
+# ---------- 4 – Docker‑Compose (v2) ----------
+log "Getting latest Docker‑Compose version"
 DC_LATEST=$(curl -fsSL https://api.github.com/repos/docker/compose/releases/latest |
             grep '"tag_name":' | cut -d'"' -f4 | sed 's/^v//')
 log "Latest Docker‑Compose = v$DC_LATEST"
@@ -139,39 +139,64 @@ else
     ${EDITOR:-vi} .env
 fi
 
-# ---------- 7️⃣ – Detect the docker‑compose file ----------
-log "Searching for docker‑compose definition"
+# ---------- 7️⃣ – Detect or create a compose file ----------
+log "Searching for a docker‑compose definition"
 
-# 1️⃣ Primary search – any file named docker‑compose.yml/.yaml (ignores hidden dirs)
+# 1️⃣ Normal locate (any file exactly named docker‑compose.yml/.yaml)
 COMPOSE_FILE=$(find . -type f \
     \( -iname 'docker-compose.yml' -o -iname 'docker-compose.yaml' \) \
     -not -path '*/\.*' | head -n1 || true)
 
-# 2️⃣ Secondary: conventional sub‑folder `docker/`
+# 2️⃣ Common sub‑folder “docker/”
 if [[ -z "$COMPOSE_FILE" && -f ./docker/docker-compose.yml ]]; then
     COMPOSE_FILE=./docker/docker-compose.yml
     ok "Found compose file in sub‑folder: $COMPOSE_FILE"
 fi
 
-# 3️⃣ Tertiary: look for example files and copy‑rename them
+# 3️⃣ Look for a *template* (example, sample, default) and copy‑rename it
 if [[ -z "$COMPOSE_FILE" ]]; then
-    EXAMPLE=$(find . -type f -iname '*compose*.example*' -or -iname '*compose*.yml*' -or -iname '*compose*.yaml*' \
-              -not -path '*/\.*' | head -n1 || true)
-    if [[ -n "$EXAMPLE" ]]; then
+    TEMPLATE=$(find . -type f \
+        \( -iname '*compose*.example*' -o -iname '*compose*.sample*' -o -iname '*compose*.default*' \) \
+        -not -path '*/\.*' | head -n1 || true)
+    if [[ -n "$TEMPLATE" ]]; then
         COMPOSE_FILE="./docker-compose.yml"
-        cp "$EXAMPLE" "$COMPOSE_FILE"
-        ok "Copied example $EXAMPLE → $COMPOSE_FILE"
+        cp "$TEMPLATE" "$COMPOSE_FILE"
+        ok "Copied template $TEMPLATE → $COMPOSE_FILE"
     fi
 fi
 
-# If still not found, abort with a friendly suggestion
+# 4️⃣ If STILL nothing, create a **minimal default compose** (hard‑coded)
 if [[ -z "$COMPOSE_FILE" ]]; then
-    echo "❌  Could NOT find any docker‑compose.yml or docker‑compose.yaml file."
-    echo "    You can list possible files with:"
-    echo "        find . -type f -iname '*compose*'"
-    echo "    If you locate the correct file, start the stack later with:"
-    echo "          docker compose -f <path‑to‑file> up -d"
-    exit 1
+    warn "No compose file found anywhere. Creating a minimal default one."
+    COMPOSE_FILE="./docker-compose.yml"
+    cat > "$COMPOSE_FILE" <<'EOF'
+# -------------------------------------------------------------------------
+# Minimal docker‑compose file for rtsp‑nvr‑dashboard.
+# It pulls the official images published by the project and uses the
+# variables from the .env file (HOST_IP, NVR_URL, ADMIN_*).
+# -------------------------------------------------------------------------
+version: "3.8"
+
+services:
+  # The web UI – usually a node/React container served by nginx
+  frontend:
+    image: ghcr.io/onebyjorah/rtsp-nvr-dashboard-frontend:latest
+    container_name: rtsp-nvr-frontend
+    env_file:
+      - ./.env
+    ports:
+      - "${HOST_IP:-0.0.0.0}:3000:3000"
+    restart: unless-stopped
+
+  # The ffmpeg worker that pulls the RTSP stream and re‑encodes it
+  ffmpeg:
+    image: ghcr.io/onebyjorah/rtsp-nvr-dashboard-ffmpeg:latest
+    container_name: rtsp-nvr-ffmpeg
+    env_file:
+      - ./.env
+    restart: unless-stopped
+EOF
+    ok "Created minimal $COMPOSE_FILE"
 fi
 
 ok "Using compose file: $COMPOSE_FILE"
@@ -186,7 +211,7 @@ sleep 5
 log "Current container status"
 docker compose -f "$COMPOSE_FILE" ps
 
-# Show the UI address
+# Show the UI URL
 HOST_IP_TO_SHOW=$(grep '^HOST_IP=' .env | cut -d'=' -f2 | tr -d '"')
 HOST_IP_TO_SHOW=${HOST_IP_TO_SHOW:-0.0.0.0}
 
