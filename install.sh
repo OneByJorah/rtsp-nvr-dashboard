@@ -12,8 +12,8 @@
 #   7) Shows final instructions + live‑log helpers
 #=====================================================================
 
-set -euo pipefail
-IFS=$'\n\t'
+set -euo pipefail                # abort on any error, undefined var, pipe fail
+IFS=$'\n\t'                     # sane field splitting
 trap 'echo -e "\n❌  Installer stopped on line $LINENO. Last command: $BASH_COMMAND\n"; exit 1' ERR
 
 # ---------- Helper functions ----------
@@ -39,23 +39,23 @@ prompt() {
     fi
 }
 
-# ---------- 1 – System info ----------
+# ---------- 1 – Detect Ubuntu version ----------
 log "Detecting Ubuntu version"
 UBUNTU_CODENAME=$(lsb_release -cs)
 log "Ubuntu codename: $UBUNTU_CODENAME"
 
-# ---------- 2 – Install APT packages ----------
+# ---------- 2 – Install APT prerequisites ----------
 log "Updating APT index"
 apt-get update -y
 log "Installing required packages"
 apt-get install -y ca-certificates curl gnupg lsb-release software-properties-common git
 
-# ---------- 3 – Docker Engine ----------
+# ---------- 3 – Install Docker Engine ----------
 log "Adding Docker GPG key"
 curl -fsSL https://download.docker.com/linux/ubuntu/gpg |
     gpg --dearmor -o /usr/share/keyrings/docker-archive-keyring.gpg
 
-log "Adding Docker APT repo"
+log "Adding Docker APT repository"
 echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/docker-archive-keyring.gpg] \
 https://download.docker.com/linux/ubuntu $UBUNTU_CODENAME stable" |
     tee /etc/apt/sources.list.d/docker.list > /dev/null
@@ -65,8 +65,8 @@ apt-get update -y
 apt-get install -y docker-ce docker-ce-cli containerd.io
 systemctl enable --now docker
 
-# ---------- 4 – Docker‑Compose (v2) ----------
-log "Getting latest Docker‑Compose version"
+# ---------- 4 – Install Docker‑Compose (v2) ----------
+log "Fetching latest Docker‑Compose version tag"
 DC_LATEST=$(curl -fsSL https://api.github.com/repos/docker/compose/releases/latest |
             grep '"tag_name":' | cut -d'"' -f4 | sed 's/^v//')
 log "Latest Docker‑Compose = v$DC_LATEST"
@@ -98,8 +98,9 @@ cd "$TARGET_DIR"
 
 create_env_interactively() {
     info "No .env template – creating a minimal one from prompts."
+
     HOST_IP=$(prompt "HOST_IP (IP the UI will bind to)" "0.0.0.0")
-    NVR_URL=$(prompt "NVR_URL (full RTSP URL, e.g. rtsp://user:pass@192.168.1.10:554/stream)")
+    NVR_URL=$(prompt "NVR_URL (RTSP URL, e.g. rtsp://user:pass@192.168.1.10:554/stream)")
     ADMIN_USER=$(prompt "ADMIN_USER (web UI login name)" "admin")
     ADMIN_PASSWORD=$(prompt "ADMIN_PASSWORD (web UI password)" "admin")
 
@@ -126,7 +127,7 @@ else
     elif [[ -f .env.default ]]; then
         cp .env.default .env && ok "Copied .env.default → .env"
     else
-        warn "No .env template found in repo."
+        warn "No .env template found in the repo."
         create_env_interactively
     fi
 fi
@@ -139,22 +140,23 @@ else
 fi
 
 # ---------- 7️⃣ – Detect the docker‑compose file ----------
-log "Searching for a docker‑compose definition"
+log "Searching for docker‑compose definition"
 
-# 1️⃣ Primary search – any file named docker‑compose.yml/.yaml (case‑insensitive)
+# 1️⃣ Primary search – any file named docker‑compose.yml/.yaml (ignores hidden dirs)
 COMPOSE_FILE=$(find . -type f \
     \( -iname 'docker-compose.yml' -o -iname 'docker-compose.yaml' \) \
     -not -path '*/\.*' | head -n1 || true)
 
-# 2️⃣ Secondary: common sub‑folder “docker/”
+# 2️⃣ Secondary: conventional sub‑folder `docker/`
 if [[ -z "$COMPOSE_FILE" && -f ./docker/docker-compose.yml ]]; then
     COMPOSE_FILE=./docker/docker-compose.yml
-    ok "Found compose file in conventional sub‑folder: $COMPOSE_FILE"
+    ok "Found compose file in sub‑folder: $COMPOSE_FILE"
 fi
 
 # 3️⃣ Tertiary: look for example files and copy‑rename them
 if [[ -z "$COMPOSE_FILE" ]]; then
-    EXAMPLE=$(find . -type f -iname '*compose*.example*' -or -iname '*compose*.yml*' -or -iname '*compose*.yaml*' | head -n1 || true)
+    EXAMPLE=$(find . -type f -iname '*compose*.example*' -or -iname '*compose*.yml*' -or -iname '*compose*.yaml*' \
+              -not -path '*/\.*' | head -n1 || true)
     if [[ -n "$EXAMPLE" ]]; then
         COMPOSE_FILE="./docker-compose.yml"
         cp "$EXAMPLE" "$COMPOSE_FILE"
@@ -162,12 +164,12 @@ if [[ -z "$COMPOSE_FILE" ]]; then
     fi
 fi
 
-# If still not found, abort with a helpful message
+# If still not found, abort with a friendly suggestion
 if [[ -z "$COMPOSE_FILE" ]]; then
     echo "❌  Could NOT find any docker‑compose.yml or docker‑compose.yaml file."
-    echo "    Possible locations you can check manually:"
+    echo "    You can list possible files with:"
     echo "        find . -type f -iname '*compose*'"
-    echo "    If you locate it, you can start the stack later with:"
+    echo "    If you locate the correct file, start the stack later with:"
     echo "          docker compose -f <path‑to‑file> up -d"
     exit 1
 fi
@@ -184,7 +186,7 @@ sleep 5
 log "Current container status"
 docker compose -f "$COMPOSE_FILE" ps
 
-# Show the address to the user
+# Show the UI address
 HOST_IP_TO_SHOW=$(grep '^HOST_IP=' .env | cut -d'=' -f2 | tr -d '"')
 HOST_IP_TO_SHOW=${HOST_IP_TO_SHOW:-0.0.0.0}
 
