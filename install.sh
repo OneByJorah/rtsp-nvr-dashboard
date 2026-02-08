@@ -2,12 +2,12 @@
 #=====================================================================
 #  RTSP NVR Dashboard – Robust installer (auto .env, Docker, logs)
 #=====================================================================
-#  What this script does
-#   1) Installs apt prerequisites (curl, git, Docker Engine)
+#  What this script does:
+#   1) Installs APT prerequisites (curl, git, Docker Engine)
 #   2) Installs Docker‑Compose v2 (CLI plugin)
 #   3) Clones / updates the dashboard repo into /opt/rtsp-nvr-dashboard
-#   4) Guarantees a usable .env (copy template or create interactively)
-#   5) Detects a docker‑compose file, falling back to a minimal default
+#   4) Guarantees a usable .env (copy template or interactive creation)
+#   5) Detects a docker‑compose file, creates a minimal fallback if needed
 #   6) Starts the stack with `docker compose -f <file> up -d`
 #   7) Shows final instructions + live‑log helpers
 #=====================================================================
@@ -16,7 +16,7 @@ set -euo pipefail
 IFS=$'\n\t'
 trap 'echo -e "\n❌  Installer stopped on line $LINENO. Last command: $BASH_COMMAND\n"; exit 1' ERR
 
-# ---------- Helper output ----------
+# ---------- Helper functions ----------
 log()   { echo -e "📦  $*"; }
 ok()    { echo -e "✅  $*"; }
 warn()  { echo -e "⚠️  $*"; }
@@ -39,34 +39,45 @@ prompt() {
     fi
 }
 
-# ---------- 1 – Detect Ubuntu ----------
+# ---------- 1 – Detect Ubuntu version ----------
 log "Detecting Ubuntu version"
 UBUNTU_CODENAME=$(lsb_release -cs)
-log "Ubuntu codename: $UBUNTU_CODENAME"
+
+# Ubuntu 24.04 (noble) does not have a public archive yet.
+# If we are on a development release, fall back to a supported LTS (jammy).
+if [[ "$UBUNTU_CODENAME" == "noble" ]]; then
+    warn "You are on Ubuntu 'noble', which is still in development."
+    warn "For the purpose of this installer we will treat it as 'jammy' (22.04 LTS)."
+    UBUNTU_CODENAME="jammy"
+fi
+log "Using Ubuntu codename: $UBUNTU_CODENAME"
 
 # ---------- 2 – Install APT prerequisites ----------
-log "Updating APT index"
-apt-get update -y
+log "Updating APT index (forcing IPv4)"
+# Force IPv4 – avoids the “Network is unreachable” IPv6 messages
+apt-get -o Acquire::ForceIPv4=true update -y
+
 log "Installing required packages"
-apt-get install -y ca-certificates curl gnupg lsb-release software-properties-common git
+apt-get -o Acquire::ForceIPv4=true install -y \
+    ca-certificates curl gnupg lsb-release software-properties-common git
 
 # ---------- 3 – Docker Engine ----------
-log "Adding Docker GPG key"
+log "Adding Docker GPG key (overwrites existing one without prompting)"
 curl -fsSL https://download.docker.com/linux/ubuntu/gpg |
     gpg --dearmor -o /usr/share/keyrings/docker-archive-keyring.gpg
 
-log "Adding Docker repository"
+log "Adding Docker APT repository"
 echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/docker-archive-keyring.gpg] \
 https://download.docker.com/linux/ubuntu $UBUNTU_CODENAME stable" |
     tee /etc/apt/sources.list.d/docker.list > /dev/null
 
 log "Installing Docker Engine"
-apt-get update -y
-apt-get install -y docker-ce docker-ce-cli containerd.io
+apt-get -o Acquire::ForceIPv4=true update -y
+apt-get -o Acquire::ForceIPv4=true install -y docker-ce docker-ce-cli containerd.io
 systemctl enable --now docker
 
 # ---------- 4 – Docker‑Compose (v2) ----------
-log "Getting latest Docker‑Compose version"
+log "Fetching latest Docker‑Compose version tag"
 DC_LATEST=$(curl -fsSL https://api.github.com/repos/docker/compose/releases/latest |
             grep '"tag_name":' | cut -d'"' -f4 | sed 's/^v//')
 log "Latest Docker‑Compose = v$DC_LATEST"
@@ -139,10 +150,10 @@ else
     ${EDITOR:-vi} .env
 fi
 
-# ---------- 7️⃣ – Detect or create a compose file ----------
+# ---------- 7️⃣ – Detect or create a docker‑compose file ----------
 log "Searching for a docker‑compose definition"
 
-# 1️⃣ Normal locate (any file exactly named docker‑compose.yml/.yaml)
+# 1️⃣ Normal file name
 COMPOSE_FILE=$(find . -type f \
     \( -iname 'docker-compose.yml' -o -iname 'docker-compose.yaml' \) \
     -not -path '*/\.*' | head -n1 || true)
@@ -153,7 +164,7 @@ if [[ -z "$COMPOSE_FILE" && -f ./docker/docker-compose.yml ]]; then
     ok "Found compose file in sub‑folder: $COMPOSE_FILE"
 fi
 
-# 3️⃣ Look for a *template* (example, sample, default) and copy‑rename it
+# 3️⃣ Look for any template (example / sample / default) and copy‑rename it
 if [[ -z "$COMPOSE_FILE" ]]; then
     TEMPLATE=$(find . -type f \
         \( -iname '*compose*.example*' -o -iname '*compose*.sample*' -o -iname '*compose*.default*' \) \
@@ -165,9 +176,9 @@ if [[ -z "$COMPOSE_FILE" ]]; then
     fi
 fi
 
-# 4️⃣ If STILL nothing, create a **minimal default compose** (hard‑coded)
+# 4️⃣ If STILL nothing, create a *minimal* default compose file.
 if [[ -z "$COMPOSE_FILE" ]]; then
-    warn "No compose file found anywhere. Creating a minimal default one."
+    warn "No compose file found anywhere – creating a minimal default one."
     COMPOSE_FILE="./docker-compose.yml"
     cat > "$COMPOSE_FILE" <<'EOF'
 # -------------------------------------------------------------------------
@@ -178,22 +189,20 @@ if [[ -z "$COMPOSE_FILE" ]]; then
 version: "3.8"
 
 services:
-  # The web UI – usually a node/React container served by nginx
+  # Web UI (frontend)
   frontend:
     image: ghcr.io/onebyjorah/rtsp-nvr-dashboard-frontend:latest
     container_name: rtsp-nvr-frontend
-    env_file:
-      - ./.env
+    env_file: ./.env
     ports:
       - "${HOST_IP:-0.0.0.0}:3000:3000"
     restart: unless-stopped
 
-  # The ffmpeg worker that pulls the RTSP stream and re‑encodes it
+  # FFmpeg worker – consumes the RTSP feed
   ffmpeg:
     image: ghcr.io/onebyjorah/rtsp-nvr-dashboard-ffmpeg:latest
     container_name: rtsp-nvr-ffmpeg
-    env_file:
-      - ./.env
+    env_file: ./.env
     restart: unless-stopped
 EOF
     ok "Created minimal $COMPOSE_FILE"
@@ -211,7 +220,7 @@ sleep 5
 log "Current container status"
 docker compose -f "$COMPOSE_FILE" ps
 
-# Show the UI URL
+# Show user the address to open
 HOST_IP_TO_SHOW=$(grep '^HOST_IP=' .env | cut -d'=' -f2 | tr -d '"')
 HOST_IP_TO_SHOW=${HOST_IP_TO_SHOW:-0.0.0.0}
 
