@@ -1,18 +1,17 @@
 #!/usr/bin/env bash
 #=====================================================================
-#  RTSP NVR Dashboard – Fully robust installer
+#  RTSP NVR Dashboard – Public, token‑free installer
 #=====================================================================
-#  What it does
-#   1) Installs apt prerequisites (curl, git, Docker Engine)
-#   2) Installs Docker‑Compose v2 (CLI plugin)
-#   3) Clones / updates the dashboard repo into /opt/rtsp-nvr-dashboard
-#   4) Guarantees a usable .env (copy template or interactive creation)
-#   5) Detects the docker‑compose file (any location, sub‑folder, template)
-#   6) Removes obsolete `version:` line (Docker‑Compose v2 no longer uses it)
-#   7) Tries to pull the GHCR images
-#        – if pull fails, asks for a PAT (read:packages) and retries,
-#        – if you skip the PAT, builds the images locally from the repo Dockerfiles
-#   8) Starts the stack (`docker compose up -d`) and prints the UI URL.
+#  What this script does
+#   1) Install required APT packages (curl, git, Docker Engine)
+#   2) Install Docker‑Compose v2 (CLI plugin)
+#   3) Clone / update the dashboard repo into /opt/rtsp-nvr-dashboard
+#   4) Create a minimal .env (or copy an existing one)
+#   5) Detect the docker‑compose file (any location, sub‑folder, template)
+#   6) **Remove any `version:` key** (Docker‑Compose v2 ignores it)
+#   7) **Build the images locally** (no pull from GHCR – images are private)
+#   8) Start the stack with `docker compose up -d`
+#   9) Print the URL to open in a browser and some log‑viewing helpers
 #=====================================================================
 
 set -euo pipefail
@@ -42,18 +41,24 @@ prompt() {
     fi
 }
 
-# ---------- 1 – Detect Ubuntu version ----------
-log "Detecting Ubuntu version"
-UBUNTU_CODENAME=$(lsb_release -cs)
+# ---------- 1 – Detect Ubuntu / Debian codename ----------
+log "Detecting distribution..."
+if command -v lsb_release >/dev/null 2>&1; then
+    UBUNTU_CODENAME=$(lsb_release -cs)
+else
+    # Fallback for minimal containers (try /etc/os-release)
+    . /etc/os-release
+    UBUNTU_CODENAME=$VERSION_CODENAME
+fi
 
-# Noble is still a development release → fall back to jammy repositories
+# If we are on the development release "noble" (Ubuntu 24.04) fallback to jammy
 if [[ "$UBUNTU_CODENAME" == "noble" ]]; then
-    warn "Running on Ubuntu 'noble' (development). Switching apt sources to jammy."
+    warn "Running on Ubuntu 'noble' (development). Using jammy APT sources."
     UBUNTU_CODENAME="jammy"
 fi
-log "Using Ubuntu codename: $UBUNTU_CODENAME"
+log "Using codename: $UBUNTU_CODENAME"
 
-# ---------- 2 – Install APT prerequisites ----------
+# ---------- 2 – Install APT prerequisites (force IPv4) ----------
 log "Updating APT index (IPv4 only)"
 apt-get -o Acquire::ForceIPv4=true update -y
 
@@ -77,7 +82,7 @@ apt-get -o Acquire::ForceIPv4=true install -y docker-ce docker-ce-cli containerd
 systemctl enable --now docker
 
 # ---------- 4 – Docker‑Compose (v2) ----------
-log "Fetching latest Docker‑Compose version tag"
+log "Fetching latest Docker‑Compose version"
 DC_LATEST=$(curl -fsSL https://api.github.com/repos/docker/compose/releases/latest |
             grep '"tag_name":' | cut -d'"' -f4 | sed 's/^v//')
 log "Latest Docker‑Compose = v$DC_LATEST"
@@ -94,7 +99,7 @@ docker compose version | head -n1
 TARGET_DIR="/opt/rtsp-nvr-dashboard"
 log "Preparing $TARGET_DIR"
 if [[ -d "$TARGET_DIR/.git" ]]; then
-    ok "Repo already exists → pulling latest changes"
+    ok "Repo already exists → pulling latest"
     pushd "$TARGET_DIR" > /dev/null
     git fetch --all
     git reset --hard origin/main
@@ -108,8 +113,8 @@ fi
 cd "$TARGET_DIR"
 
 create_env_interactively() {
-    info "No .env template – creating a minimal one from prompts."
-    HOST_IP=$(prompt "HOST_IP (IP address the UI will bind to)" "0.0.0.0")
+    info "No .env template – creating one from prompts."
+    HOST_IP=$(prompt "HOST_IP (IP the UI will bind to)" "0.0.0.0")
     NVR_URL=$(prompt "NVR_URL (RTSP URL, e.g. rtsp://user:pass@192.168.1.10:554/stream)")
     ADMIN_USER=$(prompt "ADMIN_USER (web UI login name)" "admin")
     ADMIN_PASSWORD=$(prompt "ADMIN_PASSWORD (web UI password)" "admin")
@@ -137,7 +142,7 @@ else
     elif [[ -f .env.default ]]; then
         cp .env.default .env && ok "Copied .env.default → .env"
     else
-        warn "No .env template in the repo."
+        warn "No .env template in repo."
         create_env_interactively
     fi
 fi
@@ -149,13 +154,14 @@ else
     ${EDITOR:-vi} .env
 fi
 
-# ---------- 7️⃣ – Locate docker‑compose ----------
+# ---------- 7️⃣ – Locate docker‑compose file ----------
 log "Searching for a docker‑compose definition"
+
 COMPOSE_FILE=$(find . -type f \
     \( -iname 'docker-compose.yml' -o -iname 'docker-compose.yaml' \) \
     -not -path '*/\.*' | head -n1 || true)
 
-# Sub‑folder “docker/”
+# Sub‑folder “docker/” is common
 if [[ -z "$COMPOSE_FILE" && -f ./docker/docker-compose.yml ]]; then
     COMPOSE_FILE=./docker/docker-compose.yml
     ok "Found compose file in sub‑folder: $COMPOSE_FILE"
@@ -198,46 +204,20 @@ fi
 
 ok "Using compose file: $COMPOSE_FILE"
 
-# ---------- 8️⃣ – Strip obsolete `version:` ----------
+# ---------- 8️⃣ – Remove obsolete `version:` ----------
 if grep -qi '^version:' "$COMPOSE_FILE"; then
-    warn "Removing obsolete `version:` line (Docker‑Compose v2 does not use it)."
+    warn "Removing obsolete `version:` line (Docker‑Compose v2 no longer uses it)."
     cp "$COMPOSE_FILE" "${COMPOSE_FILE}.bak"
     sed -i '/^[[:space:]]*version:/I d' "$COMPOSE_FILE"
 fi
 
-# ---------- 9️⃣ – Pull images from GHCR ----------
-log "Attempting to pull images referenced in the compose file"
-set +e               # allow pull to fail without aborting the script
-docker compose -f "$COMPOSE_FILE" pull
-PULL_EXIT=$?
-set -e               # re‑enable strict mode
-
-if [[ $PULL_EXIT -eq 0 ]]; then
-    ok "All images pulled successfully – proceeding to start the stack."
-else
-    warn "Pull failed – the images are probably private on GHCR."
-
-    read -rp "Do you have a GitHub PAT (read:packages) to authenticate? (y/N) " HAVE_TOKEN
-    HAVE_TOKEN=${HAVE_TOKEN,,}
-    if [[ "$HAVE_TOKEN" == "y" || "$HAVE_TOKEN" == "yes" ]]; then
-        GITHUB_USER=$(prompt "GitHub username")
-        echo "Enter your PAT (input hidden):"
-        read -s GITHUB_TOKEN
-        echo
-        echo "$GITHUB_TOKEN" | docker login ghcr.io -u "$GITHUB_USER" --password-stdin
-        log "Retrying pull after auth..."
-        docker compose -f "$COMPOSE_FILE" pull
-        ok "Images pulled successfully after authentication."
-    else
-        warn "Skipping authentication – building images locally from source."
-        log "Running `docker compose build` (may take a minute)…"
-        docker compose -f "$COMPOSE_FILE" build
-        ok "Local build finished."
-    fi
-fi
+# ---------- 9️⃣ – **Build images locally** (NO pull) ----------
+log "Building images locally from the repository Dockerfiles"
+docker compose -f "$COMPOSE_FILE" build
+ok "Local image build completed."
 
 # ---------- 🔟 – Bring the stack up ----------
-log "Running: docker compose -f \"$COMPOSE_FILE\" up -d"
+log "Starting the stack (`docker compose up -d`)"
 docker compose -f "$COMPOSE_FILE" up -d
 
 # ---------- 11️⃣ – Final status ----------
@@ -246,7 +226,7 @@ sleep 5
 log "Current container status"
 docker compose -f "$COMPOSE_FILE" ps
 
-# Show UI address
+# Show the UI address
 HOST_IP_TO_SHOW=$(grep '^HOST_IP=' .env | cut -d'=' -f2 | tr -d '"')
 HOST_IP_TO_SHOW=${HOST_IP_TO_SHOW:-0.0.0.0}
 
