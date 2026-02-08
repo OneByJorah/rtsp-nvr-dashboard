@@ -1,0 +1,5 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="400" height="400">
+<rect width="400" height="400" fill="#0f172a"/>
+<circle cx="200" cy="200" r="120" stroke="#38bdf8" stroke-width="8" fill="none"/>
+<text x="200" y="215" fill="#38bdf8" font-size="36" text-anchor="middle">NVR</text>
+</svg>
