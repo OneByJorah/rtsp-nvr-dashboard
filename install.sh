@@ -1,17 +1,17 @@
 #!/usr/bin/env bash
 #=====================================================================
-#  RTSP NVR Dashboard – Public, token‑free installer
+#  RTSP NVR Dashboard – Public, token‑free installer for Ubuntu
 #=====================================================================
-#  What this script does
-#   1) Install required APT packages (curl, git, Docker Engine)
-#   2) Install Docker‑Compose v2 (CLI plugin)
-#   3) Clone / update the dashboard repo into /opt/rtsp-nvr-dashboard
-#   4) Create a minimal .env (or copy an existing one)
-#   5) Detect the docker‑compose file (any location, sub‑folder, template)
-#   6) **Remove any `version:` key** (Docker‑Compose v2 ignores it)
-#   7) **Build the images locally** (no pull from GHCR – images are private)
-#   8) Start the stack with `docker compose up -d`
-#   9) Print the URL to open in a browser and some log‑viewing helpers
+#  What the script does
+#   1️⃣  Install APT prerequisites (curl, git, Docker Engine)
+#   2️⃣  Install Docker‑Compose v2 (CLI plugin)
+#   3️⃣  Clone / update the dashboard repo into /opt/rtsp-nvr-dashboard
+#   4️⃣  Create a minimal .env (or copy an existing one)
+#   5️⃣  Locate the docker‑compose file (any location, sub‑folder, template)
+#   6️⃣  **Strip the obsolete `version:` key** (Docker‑Compose v2 no longer uses it)
+#   7️⃣  **Build the images locally** (never pulls from GHCR)
+#   8️⃣  Start the stack (`docker compose up -d`)
+#   9️⃣  Print the UI URL and handy log‑viewing shortcuts
 #=====================================================================
 
 set -euo pipefail
@@ -46,17 +46,16 @@ log "Detecting distribution..."
 if command -v lsb_release >/dev/null 2>&1; then
     UBUNTU_CODENAME=$(lsb_release -cs)
 else
-    # Fallback for minimal containers (try /etc/os-release)
     . /etc/os-release
     UBUNTU_CODENAME=$VERSION_CODENAME
 fi
 
-# If we are on the development release "noble" (Ubuntu 24.04) fallback to jammy
+# If we are on the development release "noble" (Ubuntu 24.04) fall back to jammy
 if [[ "$UBUNTU_CODENAME" == "noble" ]]; then
-    warn "Running on Ubuntu 'noble' (development). Using jammy APT sources."
+    warn "Running on Ubuntu 'noble' (development). Switching apt sources to jammy."
     UBUNTU_CODENAME="jammy"
 fi
-log "Using codename: $UBUNTU_CODENAME"
+log "Using apt codename: $UBUNTU_CODENAME"
 
 # ---------- 2 – Install APT prerequisites (force IPv4) ----------
 log "Updating APT index (IPv4 only)"
@@ -67,7 +66,7 @@ apt-get -o Acquire::ForceIPv4=true install -y \
     ca-certificates curl gnupg lsb-release software-properties-common git
 
 # ---------- 3 – Docker Engine ----------
-log "Adding Docker GPG key (overwrite without prompting)"
+log "Adding Docker GPG key (overwrite if it already exists)"
 curl -fsSL https://download.docker.com/linux/ubuntu/gpg |
     gpg --dearmor -o /usr/share/keyrings/docker-archive-keyring.gpg
 
@@ -99,7 +98,7 @@ docker compose version | head -n1
 TARGET_DIR="/opt/rtsp-nvr-dashboard"
 log "Preparing $TARGET_DIR"
 if [[ -d "$TARGET_DIR/.git" ]]; then
-    ok "Repo already exists → pulling latest"
+    ok "Repository already exists → pulling the latest"
     pushd "$TARGET_DIR" > /dev/null
     git fetch --all
     git reset --hard origin/main
@@ -113,7 +112,7 @@ fi
 cd "$TARGET_DIR"
 
 create_env_interactively() {
-    info "No .env template – creating one from prompts."
+    info "No .env template – creating a minimal one from prompts."
     HOST_IP=$(prompt "HOST_IP (IP the UI will bind to)" "0.0.0.0")
     NVR_URL=$(prompt "NVR_URL (RTSP URL, e.g. rtsp://user:pass@192.168.1.10:554/stream)")
     ADMIN_USER=$(prompt "ADMIN_USER (web UI login name)" "admin")
@@ -133,7 +132,7 @@ EOF
 }
 
 if [[ -f .env ]]; then
-    ok ".env already exists – leaving it untouched."
+    ok ".env already exists – leaving untouched."
 else
     if [[ -f .env.sample ]]; then
         cp .env.sample .env && ok "Copied .env.sample → .env"
@@ -142,26 +141,25 @@ else
     elif [[ -f .env.default ]]; then
         cp .env.default .env && ok "Copied .env.default → .env"
     else
-        warn "No .env template in repo."
+        warn "No .env template in repository."
         create_env_interactively
     fi
 fi
 
-info "Opening .env for final manual edits (Ctrl‑X to keep as‑is)."
+info "Opening .env for final manual edit (Ctrl‑X to keep as‑is)."
 if command -v nano >/dev/null 2>&1; then
     nano .env
 else
     ${EDITOR:-vi} .env
 fi
 
-# ---------- 7️⃣ – Locate docker‑compose file ----------
+# ---------- 7️⃣ – Locate docker‑compose ----------
 log "Searching for a docker‑compose definition"
-
 COMPOSE_FILE=$(find . -type f \
     \( -iname 'docker-compose.yml' -o -iname 'docker-compose.yaml' \) \
     -not -path '*/\.*' | head -n1 || true)
 
-# Sub‑folder “docker/” is common
+# Common sub‑folder “docker/”
 if [[ -z "$COMPOSE_FILE" && -f ./docker/docker-compose.yml ]]; then
     COMPOSE_FILE=./docker/docker-compose.yml
     ok "Found compose file in sub‑folder: $COMPOSE_FILE"
@@ -181,7 +179,7 @@ fi
 
 # Final fallback – minimal compose that builds locally
 if [[ -z "$COMPOSE_FILE" ]]; then
-    warn "No compose file found – creating a minimal one that builds locally."
+    warn "No compose file found – creating a minimal one that builds from source."
     COMPOSE_FILE="./docker-compose.yml"
     cat > "$COMPOSE_FILE" <<'EOF'
 services:
@@ -206,15 +204,15 @@ ok "Using compose file: $COMPOSE_FILE"
 
 # ---------- 8️⃣ – Remove obsolete `version:` ----------
 if grep -qi '^version:' "$COMPOSE_FILE"; then
-    warn "Removing obsolete `version:` line (Docker‑Compose v2 no longer uses it)."
+    warn "Removing obsolete `version:` line (Docker‑Compose v2 does not use it)."
     cp "$COMPOSE_FILE" "${COMPOSE_FILE}.bak"
     sed -i '/^[[:space:]]*version:/I d' "$COMPOSE_FILE"
 fi
 
-# ---------- 9️⃣ – **Build images locally** (NO pull) ----------
-log "Building images locally from the repository Dockerfiles"
+# ---------- 9️⃣ – Build images locally (no pull) ----------
+log "Building Docker images locally (this may take a minute)…"
 docker compose -f "$COMPOSE_FILE" build
-ok "Local image build completed."
+ok "Local image build finished."
 
 # ---------- 🔟 – Bring the stack up ----------
 log "Starting the stack (`docker compose up -d`)"
@@ -226,7 +224,7 @@ sleep 5
 log "Current container status"
 docker compose -f "$COMPOSE_FILE" ps
 
-# Show the UI address
+# Show the address for the UI
 HOST_IP_TO_SHOW=$(grep '^HOST_IP=' .env | cut -d'=' -f2 | tr -d '"')
 HOST_IP_TO_SHOW=${HOST_IP_TO_SHOW:-0.0.0.0}
 
